@@ -7,7 +7,7 @@ import os
 import onnxruntime as ort
 
 # Configuration
-MODEL_PATH = 'runs/detect/train3/weights/best.onnx'
+MODEL_PATH = 'best_ir8.onnx'
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='Crack and Pothole Detection with Camera Input')
@@ -215,10 +215,17 @@ def preprocess_image(image, input_shape):
 
 def postprocess_output(output, image_shape, conf_threshold=0.4):
     """Postprocess ONNX model output"""
-    # Get output dimensions
-    boxes = output[0][:, :4]
-    scores = output[0][:, 4]
-    class_ids = output[0][:, 5].astype(int)
+    # Convert output to numpy array
+    output0 = np.asarray(output[0])
+    
+    # If output is 1D, reshape to 2D with 6 columns (YOLO format)
+    if output0.ndim == 1:
+        output0 = output0.reshape(-1, 6)
+    
+    # Extract boxes, scores, and class IDs
+    boxes = output0[:, :4]
+    scores = output0[:, 4]
+    class_ids = output0[:, 5].astype(int)
     
     # Filter by confidence
     mask = scores > conf_threshold
