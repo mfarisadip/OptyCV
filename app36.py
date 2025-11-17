@@ -217,16 +217,26 @@ def postprocess_output(output, image_shape, conf_threshold=0.4):
     """Postprocess ONNX model output"""
     # Convert output to numpy array
     output0 = np.asarray(output[0])
-    
+
     # If output is 1D, reshape to 2D with 6 columns (YOLO format)
     if output0.ndim == 1:
-        output0 = output0.reshape(-1, 6)
-    
+        # Check if the array length is divisible by 6
+        if len(output0) % 6 == 0:
+            output0 = output0.reshape(-1, 6)
+        else:
+            # If not divisible by 6, there might be a different format
+            # Return empty results for this frame
+            return [], [], []
+
+    # Check if we have valid detections
+    if output0.size == 0 or len(output0) == 0:
+        return [], [], []
+
     # Extract boxes, scores, and class IDs
     boxes = output0[:, :4]
     scores = output0[:, 4]
     class_ids = output0[:, 5].astype(int)
-    
+
     # Filter by confidence
     mask = scores > conf_threshold
     boxes = boxes[mask]
