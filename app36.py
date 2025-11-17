@@ -92,6 +92,7 @@ input_name = session.get_inputs()[0].name
 input_shape = session.get_inputs()[0].shape
 output_names = [output.name for output in session.get_outputs()]
 
+
 # Class names (replace with your actual class names)
 CLASS_NAMES = ['crack', 'pothole']  # Adjust according to your model
 
@@ -213,42 +214,54 @@ def preprocess_image(image, input_shape):
     
     return resized
 
-def postprocess_output(output, image_shape, conf_threshold=0.4):
-    """Postprocess ONNX model output"""
+def postprocess_output(output, image_shape, conf_threshold=0.05):  # Adjusted threshold
+    """Postprocess ONNX model output for YOLOv8 format"""
     # Convert output to numpy array
     output0 = np.asarray(output[0])
 
-    # Handle the actual output format: (1, 6, 1029) -> [batch, features, detections]
-    if output0.ndim == 3 and output0.shape[1] == 6:
-        # Transpose to get [detections, features] format
-        output0 = output0.transpose(0, 2, 1)[0]  # Shape: (1029, 6)
+    # Handle ONNX model output format: (1, 6, 1029) -> [batch, features, detections]
+    # Dimensi 0: batch (biasanya 1)
+    # Dimensi 1: features (6 = x1, y1, x2, y2, confidence, class_id)
+    # Dimensi 2: detections (jumlah deteksi, 1029)
 
-        # Extract boxes, scores, and class IDs
-        boxes = output0[:, :4]  # (1029, 4)
-        scores = output0[:, 4]  # (1029,)
-        class_ids = output0[:, 5].astype(int)  # (1029,)
+    if output0.ndim == 3 and output0.shape[1] == 6:
+        # Format: (1, 6, 1029) -> [batch, features, detections]
+        # Transpose menjadi (1, 1029, 6) -> [batch, detections, features]
+        output0 = output0.transpose(0, 2, 1)  # Shape: (1, 1029, 6)
+        output0 = output0[0]  # Ambil batch pertama: (1029, 6)
+
+        # Filter detections dengan confidence > 0
+        # Format YOLO: [x1, y1, x2, y2, confidence, class_id]
+        conf_mask = output0[:, 4] > conf_threshold  # Filter berdasarkan confidence
+        valid_detections = output0[conf_mask]  # Shape: (n_valid_detections, 6)
+
+        if len(valid_detections) == 0:
+            return [], [], []
+
+        # Extract boxes, scores, dan class IDs
+        boxes = valid_detections[:, :4]  # (n_valid_detections, 4)
+        scores = valid_detections[:, 4]  # (n_valid_detections,)
+        class_ids = valid_detections[:, 5].astype(int)  # (n_valid_detections,)
 
     elif output0.ndim == 2:
-        # Standard 2D output format
+        # Standard 2D output format (fallback)
         if output0.shape[1] >= 6:
             # YOLO format: [x1, y1, x2, y2, confidence, class_id, ...]
-            boxes = output0[:, :4]
-            scores = output0[:, 4]
-            class_ids = output0[:, 5].astype(int)
+            conf_mask = output0[:, 4] > conf_threshold
+            valid_detections = output0[conf_mask]
+
+            if len(valid_detections) == 0:
+                return [], [], []
+
+            boxes = valid_detections[:, :4]
+            scores = valid_detections[:, 4]
+            class_ids = valid_detections[:, 5].astype(int)
         else:
-            # Unexpected format
             print(f"Unexpected 2D output shape: {output0.shape}")
             return [], [], []
     else:
-        # Unexpected format
         print(f"Unexpected output format: {output0.shape}")
         return [], [], []
-
-    # Filter by confidence
-    mask = scores > conf_threshold
-    boxes = boxes[mask]
-    scores = scores[mask]
-    class_ids = class_ids[mask]
     
     # Scale boxes to original image size
     input_height, input_width = image_shape[0], image_shape[1]
@@ -331,25 +344,30 @@ def process_frame(frame: np.ndarray, frame_index: int = None) -> np.ndarray:
     tracked_objects = centroid_tracker.update(filtered_detections)
     
     # Create tracker IDs and associate with detections
-    tracker_ids = []
+    tracker_ids = [-1] * len(filtered_detections)  # Initialize with -1 for all detections
+
+    # Match tracked objects with detections
+    used_detection_indices = set()
     for object_id, centroid in tracked_objects:
         # Find the detection closest to this centroid
         min_dist = float('inf')
         closest_idx = -1
-        
+
         for i, detection in enumerate(filtered_detections):
+            if i in used_detection_indices:
+                continue  # Skip already matched detections
+
             cX = int((detection[0] + detection[2]) / 2.0)
             cY = int((detection[1] + detection[3]) / 2.0)
             dist = np.sqrt((cX - centroid[0])**2 + (cY - centroid[1])**2)
-            
+
             if dist < min_dist:
                 min_dist = dist
                 closest_idx = i
-        
+
         if closest_idx != -1 and min_dist < 50:  # Threshold for matching
-            tracker_ids.append(object_id)
-        else:
-            tracker_ids.append(-1)  # No match
+            tracker_ids[closest_idx] = object_id
+            used_detection_indices.add(closest_idx)
     
     # Draw detections
     annotated_frame = frame.copy()
