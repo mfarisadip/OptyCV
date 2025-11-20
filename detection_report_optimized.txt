@@ -1,16 +1,16 @@
 
 OPTIMIZED CRACK AND POTHOLE DETECTION REPORT
 Source: pole.mp4
-Model: best_ir8.onnx
-Processing Date: 2025-11-19 21:27:12
+Model: weights/YOLOV8n640IR8.onnx
+Processing Date: 2025-11-20 22:06:20
 Line Position: Y=396 (55% from top)
-Using CUDA: False
 
 SUMMARY:
-- Total Potholes Detected: 0
+- Total Potholes Detected: 1
 - Total Cracks Detected: 0
-- Total Detections: 0
-- Processing Time: 5.35 seconds
-- Processing Speed: 131.15 FPS
+- Total Detections: 1
+- Processing Time: 31.05 seconds
+- Processing Speed: 22.64 FPS
 
 DETAILED LOG:
+- POTHOLE (Tracker #15) at 00:15 (Frame 458, Y: 421, Confidence: 0.55) [Detected Below Line]

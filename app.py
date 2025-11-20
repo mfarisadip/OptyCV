@@ -7,7 +7,7 @@ import cv2
 import argparse
 
 # Configuration
-MODEL_PATH = '/Users/sweetjichu/Documents/faris-lab/Roots/runs/detect/train3/weights/best.onnx'
+MODEL_PATH = 'weights/YOLOV8n640IR8.onnx'
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='Crack and Pothole Detection with Camera Input')

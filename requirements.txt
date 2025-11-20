@@ -1,16 +1,16 @@
 # Core ML and CV libraries
-torch==1.8.0
-torchvision==1.8.0
+torch
+torchvision
 ultralytics
 opencv-python
 supervision
 numpy
 
 # ONNX Runtime for model inference
-onnx==1.11.0
+onnx
 onnxslim
-onnxruntime==1.11.0
-onnxruntime-gpu==1.11.0
+onnxruntime
+onnxruntime-gpu
 
 # Dataset and utilities
 roboflow
