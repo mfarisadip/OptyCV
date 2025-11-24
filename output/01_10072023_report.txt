@@ -1,0 +1,30 @@
+
+OPTIMIZED CRACK AND POTHOLE DETECTION REPORT
+Source: media/01_10072023.mp4
+Model: weights/best.pt
+Device: CPU
+Processing Date: 2025-11-23 18:17:10
+Line Position: Y=594 (55% from top)
+
+SUMMARY:
+- Total Potholes Detected: 5
+- Total Alligator Cracking Detected: 2
+- Total Lateral Cracking Detected: 0
+- Total Longitudinal Cracking Detected: 3
+- Total Other Cracks Detected: 0
+- Total Detections: 10
+- Processing Time: 40.01 seconds
+- Processing Speed: 7.80 FPS if frames processed >0
+- Hardware Acceleration: CPU
+
+DETAILED LOG:
+- ALLIGATOR_CRACKING (Tracker #1) at 00:00 (Frame 0, Y: 1027, Confidence: 0.57) [Detected Below Line]
+- POTHOLE (Tracker #3) at 00:00 (Frame 22, Y: 856, Confidence: 0.52) [Detected Below Line]
+- ALLIGATOR_CRACKING (Tracker #4) at 00:00 (Frame 26, Y: 889, Confidence: 0.55) [Detected Below Line]
+- LONGITUDINAL_CRACKING (Tracker #5) at 00:01 (Frame 44, Y: 858, Confidence: 0.59) [Detected Below Line]
+- LONGITUDINAL_CRACKING (Tracker #7) at 00:02 (Frame 66, Y: 973, Confidence: 0.56) [Detected Below Line]
+- POTHOLE (Tracker #8) at 00:02 (Frame 75, Y: 915, Confidence: 0.49) [Detected Below Line]
+- LONGITUDINAL_CRACKING (Tracker #10) at 00:02 (Frame 77, Y: 1039, Confidence: 0.45) [Detected Below Line]
+- POTHOLE (Tracker #31) at 00:05 (Frame 156, Y: 805, Confidence: 0.57) [Detected Below Line]
+- POTHOLE (Tracker #40) at 00:06 (Frame 192, Y: 876, Confidence: 0.47) [Detected Below Line]
+- POTHOLE (Tracker #47) at 00:09 (Frame 288, Y: 828, Confidence: 0.51) [Detected Below Line]
