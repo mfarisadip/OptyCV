@@ -131,7 +131,7 @@ def setup_output_paths(source_path, save_video_flag):
         print(f"📁 Created video output folder: {video_folder}")
 
     # Generate output paths
-    video_path = os.path.join(video_folder, f"{base_name}_annotated.mp4") if save_video_flag else None
+    video_path = os.path.join(video_folder, f"{base_name}_detections.mp4") if save_video_flag else None
     report_path = os.path.join(output_folder, f"{base_name}_report.txt")
 
     return base_name, video_path, report_path
