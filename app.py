@@ -125,7 +125,7 @@ def setup_output_paths(source_path, save_video_flag):
     base_name = f"{video_filename}-{PROJECT_START_TIME}"
 
     # Create subfolder for videos
-    video_folder = os.path.join(output_folder, "video")
+    video_folder = os.path.join(output_folder, "videos")
     if save_video_flag and not os.path.exists(video_folder):
         os.makedirs(video_folder)
         print(f"📁 Created video output folder: {video_folder}")
@@ -495,7 +495,7 @@ if __name__ == "__main__":
     else:
         # Process video file using supervision.process_video wrapper (uses callback)
         print(f"🎥 Processing video: {SOURCE_VIDEO_PATH}")
-        print(f"📁 Output folder: outputs/video/")
+        print(f"📁 Output folder: outputs/videos/")
         if TARGET_VIDEO_PATH:
             print(f"📹 Output video: {TARGET_VIDEO_PATH}")
         print(f"📄 Output report: {REPORT_PATH}")
