@@ -45,6 +45,12 @@ class DetectionExporter:
         self.detection_counter = 0
         self.processed_trackers = set()
 
+        # FPS tracking
+        self.fps_samples = []
+        self.min_fps = None
+        self.max_fps = None
+        self.avg_fps = None
+
         print(f"📁 Detection Exporter initialized")
         print(f"   JSON Output: {self.json_filename}")
         print(f"   Captures Folder: {self.captures_folder}")
@@ -165,9 +171,30 @@ class DetectionExporter:
         print(f"{emoji} {class_name.upper()} #{tracker_id} detected at {detection_record['video_time']} "
               f"(Frame {frame_index}, Y:{bbox_center_y}, Conf:{confidence:.2f})")
 
+    def add_fps_sample(self, fps: float):
+        """Add a FPS sample for tracking"""
+        self.fps_samples.append(fps)
+
+    def calculate_fps_stats(self):
+        """Calculate min, max, and average FPS from samples"""
+        if self.fps_samples:
+            self.min_fps = min(self.fps_samples)
+            self.max_fps = max(self.fps_samples)
+            self.avg_fps = sum(self.fps_samples) / len(self.fps_samples)
+
+            # Store in video info for JSON export
+            self.detection_data["video_info"]["performance"] = {
+                "min_fps": round(self.min_fps, 2),
+                "max_fps": round(self.max_fps, 2),
+                "avg_fps": round(self.avg_fps, 2),
+                "total_samples": len(self.fps_samples)
+            }
+
     def finalize_processing(self, processing_time: float):
         """Finalize the export data with processing information"""
         self.detection_data["video_info"]["processing_time"] = round(processing_time, 2)
+        # Calculate FPS stats when finalizing
+        self.calculate_fps_stats()
 
     def save_json(self) -> str:
         """Save detection data to JSON file and return file path"""
@@ -187,6 +214,16 @@ class DetectionExporter:
     def get_detection_summary(self) -> Dict[str, Any]:
         """Get current detection summary"""
         cracks_summary = self.detection_data["detection_summary"]["cracks"]
+
+        # Get FPS stats if available
+        fps_stats = {}
+        if hasattr(self, 'min_fps') and self.min_fps is not None:
+            fps_stats = {
+                "min_fps": round(self.min_fps, 2),
+                "max_fps": round(self.max_fps, 2),
+                "avg_fps": round(self.avg_fps, 2)
+            }
+
         return {
             "total_detections": self.detection_data["detection_summary"]["total_detections"],
             "potholes": self.detection_data["detection_summary"]["potholes"],
@@ -197,7 +234,8 @@ class DetectionExporter:
             "lateral_cracking": cracks_summary.get("lateral_cracking", 0),
             "longitudinal_cracking": cracks_summary.get("longitudinal_cracking", 0),
             "rutting": cracks_summary.get("rutting", 0),
-            "frames_saved": self.detection_counter
+            "frames_saved": self.detection_counter,
+            **fps_stats  # Add FPS stats if available
         }
 
     def export_summary_report(self) -> str:
@@ -222,6 +260,12 @@ DETECTION SUMMARY:
   - Longitudinal Cracking: {summary['longitudinal_cracking']}
   - Rutting: {summary['rutting']}
 - Frames Saved: {summary['frames_saved']}
+
+PERFORMANCE:
+- Processing Time: {self.detection_data['video_info'].get('processing_time', 'N/A')} seconds
+- Min FPS: {summary.get('min_fps', 'N/A')}
+- Max FPS: {summary.get('max_fps', 'N/A')}
+- Average FPS: {summary.get('avg_fps', 'N/A')}
 
 OUTPUT FILES:
 - JSON Data: {self.json_filename}

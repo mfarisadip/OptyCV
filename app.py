@@ -449,6 +449,7 @@ def process_camera_feed():
 
     frame_count = 0
     start_processing_time = time.time()
+    last_frame_time = start_processing_time
 
     try:
         while True:
@@ -456,6 +457,13 @@ def process_camera_feed():
             if not ret:
                 print("Failed to grab frame from camera")
                 break
+
+            # Calculate FPS for this frame
+            current_frame_time = time.time()
+            frame_time = current_frame_time - last_frame_time
+            if frame_time > 0:
+                current_fps = 1.0 / frame_time
+                detection_exporter.add_fps_sample(current_fps)
 
             processed_frame = process_frame(frame, frame_count)
 
@@ -473,6 +481,7 @@ def process_camera_feed():
                 print(f"Screenshot saved: {screenshot_path}")
 
             frame_count += 1
+            last_frame_time = current_frame_time
 
     except KeyboardInterrupt:
         print("\nCamera processing interrupted by user")
@@ -549,6 +558,10 @@ if __name__ == "__main__":
     else:
         print(f"🎬 Total Frames Processed: {total_frames}")
         print(f"🚀 Processing Speed: {total_frames/processing_duration:.2f} FPS")
+
+        # Display FPS statistics for camera mode
+        if 'min_fps' in final_summary:
+            print(f"⚡ FPS Stats - Min: {final_summary['min_fps']:.1f} | Max: {final_summary['max_fps']:.1f} | Average: {final_summary['avg_fps']:.1f}")
 
     print(f"\n📄 Detection Data: {json_path}")
     print(f"📋 Summary Report: {summary_path}")
