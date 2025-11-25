@@ -18,6 +18,10 @@ import torch
 import supervision as sv
 from ultralytics import YOLO
 
+# Modular components
+from detection_exporter import DetectionExporter
+from config import LINE_POSITION_PERCENTAGE, DETECTION_CLASSES
+
 # ---------------------------
 # Configuration & Arguments
 # ---------------------------
@@ -212,9 +216,34 @@ else:
     print(f"Video loaded: {SOURCE_VIDEO_PATH} -> {video_info.width}x{video_info.height} @ {video_info.fps} FPS, total {video_info.total_frames} frames")
 
 # line position (55% from top)
-line_y_position = int(video_info.height * 0.55)
+line_y_position = int(video_info.height * LINE_POSITION_PERCENTAGE)
 LINE_START = sv.Point(0, line_y_position)
 LINE_END = sv.Point(video_info.width, line_y_position)
+
+# ---------------------------
+# Initialize Detection Exporter
+# ---------------------------
+if USE_CAMERA:
+    # For camera mode, use a generic camera identifier
+    camera_source_path = f"camera_{CAMERA_ID}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+else:
+    camera_source_path = SOURCE_VIDEO_PATH
+
+detection_exporter = DetectionExporter(
+    video_path=camera_source_path,
+    model_path=MODEL_PATH,
+    device=DEVICE_STR,
+    conf_threshold=CONF_THRESHOLD,
+    iou_threshold=IOU_THRESHOLD
+)
+
+# Update video info in exporter
+resolution_str = f"{video_info.width}x{video_info.height}"
+detection_exporter.update_video_info(
+    total_frames=video_info.total_frames or 0,
+    fps=video_info.fps or 0,
+    resolution=resolution_str
+)
 
 # ---------------------------
 # Load YOLO model (ONNX or PT)
@@ -240,16 +269,8 @@ label_annotator = sv.LabelAnnotator()
 trace_annotator = sv.TraceAnnotator()
 
 # ---------------------------
-# Detection Tracking Variables
+# Detection Variables (managed by DetectionExporter)
 # ---------------------------
-pothole_count = 0
-alligator_cracking_count = 0
-lateral_cracking_count = 0
-longitudinal_cracking_count = 0
-rutting_count = 0
-crack_count = 0  # generic crack count fallback
-detection_log = []
-processed_trackers = set()
 
 def get_timestamp(frame_index, fps):
     """Convert frame index to timestamp in MM:SS format"""
@@ -266,16 +287,6 @@ def filter_detections(detections):
     if detections is None or len(detections) == 0:
         return sv.Detections.empty()
 
-    # Valid classes that should be detected
-    valid_classes = [
-        'pothole',
-        'alligator cracking',
-        'lateral cracking',
-        'longitudinal cracking',
-        'rutting',
-        'crack'  # fallback for generic crack class
-    ]
-
     filtered_indices = []
     for i, class_id in enumerate(detections.class_id):
         # use model.names to map class id to name
@@ -286,7 +297,7 @@ def filter_detections(detections):
             class_name = str(class_id).lower()
 
         # Check if class_name is in our valid classes list
-        if class_name in valid_classes:
+        if class_name in DETECTION_CLASSES:
             filtered_indices.append(i)
 
     if filtered_indices:
@@ -296,7 +307,6 @@ def filter_detections(detections):
 
 def process_frame(frame: np.ndarray, frame_index: int = None) -> np.ndarray:
     """Process a single frame for crack and pothole detection"""
-    global pothole_count, crack_count, alligator_cracking_count, lateral_cracking_count, longitudinal_cracking_count, rutting_count, detection_log, processed_trackers
 
     start_time = time.time()
 
@@ -341,100 +351,35 @@ def process_frame(frame: np.ndarray, frame_index: int = None) -> np.ndarray:
     # Timestamp for logs
     timestamp = get_timestamp(frame_index, video_info.fps) if frame_index is not None else "LIVE"
 
-    # Check objects below the line and log new trackers
+    # Check objects below the line and export detections using DetectionExporter
     if hasattr(detections, 'tracker_id') and detections.tracker_id is not None:
         for i, tracker_id in enumerate(detections.tracker_id):
             if tracker_id is None:
                 continue
-            if tracker_id not in processed_trackers:
-                bbox = detections.xyxy[i]
-                center_y = int((bbox[1] + bbox[3]) / 2)
-                # check if object center is below line
-                if center_y >= line_y_position:
-                    class_id = int(detections.class_id[i])
-                    class_name = model.names[class_id].lower() if class_id in model.names else "unknown"
-                    confidence = float(detections.confidence[i])
 
-                    # Handle different types of detections
-                    if class_name == 'pothole':
-                        pothole_count += 1
-                        detection_log.append({
-                            'type': 'pothole',
-                            'tracker_id': int(tracker_id),
-                            'timestamp': timestamp,
-                            'frame': frame_index if frame_index is not None else 0,
-                            'position': int(center_y),
-                            'confidence': confidence,
-                            'detection_type': 'detected_below_line'
-                        })
-                        print(f"🕳️ POTHOLE #{pothole_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Conf:{confidence:.2f})")
+            # Get detection data
+            bbox = detections.xyxy[i]
+            class_id = int(detections.class_id[i])
+            class_name = model.names[class_id] if class_id in model.names else str(class_id)
+            confidence = float(detections.confidence[i])
 
-                    elif class_name == 'alligator cracking':
-                        alligator_cracking_count += 1
-                        detection_log.append({
-                            'type': 'alligator_cracking',
-                            'tracker_id': int(tracker_id),
-                            'timestamp': timestamp,
-                            'frame': frame_index if frame_index is not None else 0,
-                            'position': int(center_y),
-                            'confidence': confidence,
-                            'detection_type': 'detected_below_line'
-                        })
-                        print(f"🐊 ALLIGATOR CRACKING #{alligator_cracking_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Conf:{confidence:.2f})")
+            # Use DetectionExporter to handle detection logic (pass annotated_frame with boxes)
+            detection_exporter.add_detection(
+                annotated_frame=annotated_frame,  # Save annotated frame with bounding boxes
+                frame_index=frame_index if frame_index is not None else 0,
+                tracker_id=int(tracker_id),
+                class_name=class_name,
+                confidence=confidence,
+                bbox=bbox.tolist(),
+                fps=video_info.fps or 30,
+                line_y_position=line_y_position,
+                video_info=video_info
+            )
 
-                    elif class_name == 'lateral cracking':
-                        lateral_cracking_count += 1
-                        detection_log.append({
-                            'type': 'lateral_cracking',
-                            'tracker_id': int(tracker_id),
-                            'timestamp': timestamp,
-                            'frame': frame_index if frame_index is not None else 0,
-                            'position': int(center_y),
-                            'confidence': confidence,
-                            'detection_type': 'detected_below_line'
-                        })
-                        print(f"↔️ LATERAL CRACKING #{lateral_cracking_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Conf:{confidence:.2f})")
-
-                    elif class_name == 'longitudinal cracking':
-                        longitudinal_cracking_count += 1
-                        detection_log.append({
-                            'type': 'longitudinal_cracking',
-                            'tracker_id': int(tracker_id),
-                            'timestamp': timestamp,
-                            'frame': frame_index if frame_index is not None else 0,
-                            'position': int(center_y),
-                            'confidence': confidence,
-                            'detection_type': 'detected_below_line'
-                        })
-                        print(f"↕️ LONGITUDINAL CRACKING #{longitudinal_cracking_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Conf:{confidence:.2f})")
-
-                    elif class_name == 'rutting':
-                        rutting_count += 1
-                        detection_log.append({
-                            'type': 'rutting',
-                            'tracker_id': int(tracker_id),
-                            'timestamp': timestamp,
-                            'frame': frame_index if frame_index is not None else 0,
-                            'position': int(center_y),
-                            'confidence': confidence,
-                            'detection_type': 'detected_below_line'
-                        })
-                        print(f"🛤️  RUTTING #{rutting_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Conf:{confidence:.2f})")
-
-                    elif class_name == 'crack':
-                        crack_count += 1
-                        detection_log.append({
-                            'type': 'crack',
-                            'tracker_id': int(tracker_id),
-                            'timestamp': timestamp,
-                            'frame': frame_index if frame_index is not None else 0,
-                            'position': int(center_y),
-                            'confidence': confidence,
-                            'detection_type': 'detected_below_line'
-                        })
-                        print(f"〰️ CRACK #{crack_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Conf:{confidence:.2f})")
-
-                    processed_trackers.add(tracker_id)
+    # Update counters from exporter for display
+    exporter_summary = detection_exporter.get_detection_summary()
+    pothole_count = exporter_summary['potholes']
+    total_cracks = exporter_summary['total_cracks']
 
     # Overlay stats text
     processing_time = time.time() - start_time
@@ -442,9 +387,6 @@ def process_frame(frame: np.ndarray, frame_index: int = None) -> np.ndarray:
         frame_text = f'Frame: {frame_index}/{video_info.total_frames}'
     else:
         frame_text = f'Frame: {frame_index if frame_index is not None else "LIVE"}'
-
-        # Calculate total cracks (all crack types combined)
-    total_cracks = alligator_cracking_count + lateral_cracking_count + longitudinal_cracking_count + rutting_count + crack_count
 
     cv2.putText(annotated_frame, frame_text, (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
@@ -566,20 +508,28 @@ if __name__ == "__main__":
         total_frames = video_info.total_frames
         source_text = SOURCE_VIDEO_PATH
 
+    # Finalize processing and export results
+    detection_exporter.finalize_processing(processing_duration)
+    json_path = detection_exporter.save_json()
+    summary_path = detection_exporter.export_summary_report()
+
+    # Get final summary from exporter
+    final_summary = detection_exporter.get_detection_summary()
+
     # Summary
     print("\n" + "="*60)
     print("🔍 FINAL DETECTION SUMMARY")
     print("="*60)
     print(f"📹 Source: {source_text}")
     print(f"🖥️  Device: {DEVICE_STR.upper()} (device_arg={device_arg})")
-    print(f"🕳️  Total Potholes Detected: {pothole_count}")
-    print(f"🐊  Total Alligator Cracking Detected: {alligator_cracking_count}")
-    print(f"↔️  Total Lateral Cracking Detected: {lateral_cracking_count}")
-    print(f"↕️  Total Longitudinal Cracking Detected: {longitudinal_cracking_count}")
-    print(f"🛤️  Total Rutting Detected: {rutting_count}")
-    print(f"〰️  Total Other Cracks Detected: {crack_count}")
-    total_detections = pothole_count + alligator_cracking_count + lateral_cracking_count + longitudinal_cracking_count + rutting_count + crack_count
-    print(f"📊 Total Detections: {total_detections}")
+    print(f"🕳️  Total Potholes Detected: {final_summary['potholes']}")
+    print(f"🐊  Total Alligator Cracking Detected: {final_summary['alligator_cracking']}")
+    print(f"↔️  Total Lateral Cracking Detected: {final_summary['lateral_cracking']}")
+    print(f"↕️  Total Longitudinal Cracking Detected: {final_summary['longitudinal_cracking']}")
+    print(f"🛤️  Total Rutting Detected: {final_summary['rutting']}")
+    print(f"〰️  Total Other Cracks Detected: {final_summary['crack']}")
+    print(f"📊 Total Detections: {final_summary['total_detections']}")
+    print(f"📸 Frames Saved: {final_summary['frames_saved']}")
     print(f"⏱️  Processing Time: {processing_duration:.2f} seconds")
 
     if not USE_CAMERA:
@@ -590,86 +540,11 @@ if __name__ == "__main__":
         print(f"🎬 Total Frames Processed: {total_frames}")
         print(f"🚀 Processing Speed: {total_frames/processing_duration:.2f} FPS")
 
-    if detection_log:
-        print("\n📋 Detailed Detection Log:")
-        print("-" * 60)
-        pothole_logs = [log for log in detection_log if log['type'] == 'pothole']
-        alligator_logs = [log for log in detection_log if log['type'] == 'alligator_cracking']
-        lateral_logs = [log for log in detection_log if log['type'] == 'lateral_cracking']
-        longitudinal_logs = [log for log in detection_log if log['type'] == 'longitudinal_cracking']
-        rutting_logs = [log for log in detection_log if log['type'] == 'rutting']
-        crack_logs = [log for log in detection_log if log['type'] == 'crack']
-
-        if pothole_logs:
-            print(f"\n🕳️  Potholes ({len(pothole_logs)}):")
-            for i, log in enumerate(pothole_logs, 1):
-                detection_type = log.get('detection_type', 'unknown')
-                print(f"   {i}. Tracker ID #{log['tracker_id']} at {log['timestamp']} (Frame {log['frame']}, Y: {log['position']}, Conf: {log['confidence']:.2f}) [{detection_type.replace('_', ' ').title()}]")
-
-        if alligator_logs:
-            print(f"\n🐊  Alligator Cracking ({len(alligator_logs)}):")
-            for i, log in enumerate(alligator_logs, 1):
-                detection_type = log.get('detection_type', 'unknown')
-                print(f"   {i}. Tracker ID #{log['tracker_id']} at {log['timestamp']} (Frame {log['frame']}, Y: {log['position']}, Conf: {log['confidence']:.2f}) [{detection_type.replace('_', ' ').title()}]")
-
-        if lateral_logs:
-            print(f"\n↔️  Lateral Cracking ({len(lateral_logs)}):")
-            for i, log in enumerate(lateral_logs, 1):
-                detection_type = log.get('detection_type', 'unknown')
-                print(f"   {i}. Tracker ID #{log['tracker_id']} at {log['timestamp']} (Frame {log['frame']}, Y: {log['position']}, Conf: {log['confidence']:.2f}) [{detection_type.replace('_', ' ').title()}]")
-
-        if longitudinal_logs:
-            print(f"\n↕️  Longitudinal Cracking ({len(longitudinal_logs)}):")
-            for i, log in enumerate(longitudinal_logs, 1):
-                detection_type = log.get('detection_type', 'unknown')
-                print(f"   {i}. Tracker ID #{log['tracker_id']} at {log['timestamp']} (Frame {log['frame']}, Y: {log['position']}, Conf: {log['confidence']:.2f}) [{detection_type.replace('_', ' ').title()}]")
-
-        if rutting_logs:
-            print(f"\n🛤️  Rutting ({len(rutting_logs)}):")
-            for i, log in enumerate(rutting_logs, 1):
-                detection_type = log.get('detection_type', 'unknown')
-                print(f"   {i}. Tracker ID #{log['tracker_id']} at {log['timestamp']} (Frame {log['frame']}, Y: {log['position']}, Conf: {log['confidence']:.2f}) [{detection_type.replace('_', ' ').title()}]")
-
-        if crack_logs:
-            print(f"\n〰️  Other Cracks ({len(crack_logs)}):")
-            for i, log in enumerate(crack_logs, 1):
-                detection_type = log.get('detection_type', 'unknown')
-                print(f"   {i}. Tracker ID #{log['tracker_id']} at {log['timestamp']} (Frame {log['frame']}, Y: {log['position']}, Conf: {log['confidence']:.2f}) [{detection_type.replace('_', ' ').title()}]")
-
+    print(f"\n📄 Detection Data: {json_path}")
+    print(f"📋 Summary Report: {summary_path}")
     print("="*60)
 
-    # Save report
-    cuda_device_info = f"CUDA Device: {CUDA_DEVICE_NAME} (ID: {args.cuda_device})" if DEVICE_STR.startswith('cuda') else "Device: CPU"
-    report_content = f"""
-OPTIMIZED CRACK AND POTHOLE DETECTION REPORT
-Source: {source_text}
-Model: {MODEL_PATH}
-{cuda_device_info}
-Processing Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-Line Position: Y={line_y_position} (55% from top)
-
-SUMMARY:
-- Total Potholes Detected: {pothole_count}
-- Total Alligator Cracking Detected: {alligator_cracking_count}
-- Total Lateral Cracking Detected: {lateral_cracking_count}
-- Total Longitudinal Cracking Detected: {longitudinal_cracking_count}
-- Total Rutting Detected: {rutting_count}
-- Total Other Cracks Detected: {crack_count}
-- Total Detections: {pothole_count + alligator_cracking_count + lateral_cracking_count + longitudinal_cracking_count + rutting_count + crack_count}
-- Processing Time: {processing_duration:.2f} seconds
-- Processing Speed: {(total_frames/processing_duration):.2f} FPS if frames processed >0
-- Hardware Acceleration: {DEVICE_STR.upper()}
-
-DETAILED LOG:
-"""
-    if detection_log:
-        for log in detection_log:
-            detection_type = log.get('detection_type', 'unknown')
-            report_content += f"- {log['type'].upper()} (Tracker #{log['tracker_id']}) at {log['timestamp']} (Frame {log['frame']}, Y: {log['position']}, Confidence: {log['confidence']:.2f}) [{detection_type.replace('_', ' ').title()}]\n"
-
-    with open(REPORT_PATH, "w") as f:
-        f.write(report_content)
-
-    print(f"📄 Detection report saved to: {REPORT_PATH}")
+    # Final message - reports already saved by DetectionExporter
+    print("✅ All reports and data files have been generated successfully!")
     if TARGET_VIDEO_PATH and not USE_CAMERA:
         print(f"🎥 Annotated video saved to: {TARGET_VIDEO_PATH}")
