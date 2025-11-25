@@ -106,22 +106,32 @@ DEVICE_STR, device_arg = determine_device_str_and_arg(args.device, args.cuda_dev
 # Output Folder and Paths Setup
 # ---------------------------
 def setup_output_paths(source_path, save_video_flag):
-    """Create output folder and generate dynamic output paths"""
+    """Create output folder and generate dynamic output paths using detection exporter format"""
     # Create output folder if it doesn't exist
-    output_folder = "output"
+    output_folder = "outputs"
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
         print(f"📁 Created output folder: {output_folder}")
 
-    # Generate base filename from source
+    # Generate base filename using same format as DetectionExporter
     if args.source == 'camera':
-        base_name = f"camera_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        video_filename = f"camera_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     else:
         # Extract filename without extension
-        base_name = os.path.splitext(os.path.basename(source_path))[0]
+        video_filename = os.path.splitext(os.path.basename(source_path))[0]
+
+    # Use same timestamp format as DetectionExporter
+    from config import PROJECT_START_TIME
+    base_name = f"{video_filename}-{PROJECT_START_TIME}"
+
+    # Create subfolder for videos
+    video_folder = os.path.join(output_folder, "video")
+    if save_video_flag and not os.path.exists(video_folder):
+        os.makedirs(video_folder)
+        print(f"📁 Created video output folder: {video_folder}")
 
     # Generate output paths
-    video_path = os.path.join(output_folder, f"{base_name}_annotated.mp4") if save_video_flag else None
+    video_path = os.path.join(video_folder, f"{base_name}_annotated.mp4") if save_video_flag else None
     report_path = os.path.join(output_folder, f"{base_name}_report.txt")
 
     return base_name, video_path, report_path
@@ -485,7 +495,7 @@ if __name__ == "__main__":
     else:
         # Process video file using supervision.process_video wrapper (uses callback)
         print(f"🎥 Processing video: {SOURCE_VIDEO_PATH}")
-        print(f"📁 Output folder: output/")
+        print(f"📁 Output folder: outputs/video/")
         if TARGET_VIDEO_PATH:
             print(f"📹 Output video: {TARGET_VIDEO_PATH}")
         print(f"📄 Output report: {REPORT_PATH}")
