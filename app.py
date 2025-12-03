@@ -21,6 +21,7 @@ from ultralytics import YOLO
 # Modular components
 from detection_exporter import DetectionExporter
 from config import LINE_POSITION_PERCENTAGE, DETECTION_CLASSES
+from gps_manager import GPSManager
 
 # ---------------------------
 # Configuration & Arguments
@@ -44,6 +45,9 @@ parser.add_argument('--model', type=str, default='weights/YOLOV8n320IR8.onnx',
                     help='Model path (can be .onnx or .pt). For ONNX use device arg at predict-time.')
 parser.add_argument('--conf', type=float, default=0.4, help='Confidence threshold')
 parser.add_argument('--iou', type=float, default=0.3, help='NMS IoU threshold')
+parser.add_argument('--use-gps', action='store_true', help='Enable GPS for location tagging')
+parser.add_argument('--gps-port', type=str, default='/dev/ttyUSB3', help='GPS serial port (default: /dev/ttyUSB3)')
+parser.add_argument('--gps-baud', type=int, default=115200, help='GPS baud rate (default: 115200)')
 args = parser.parse_args()
 
 MODEL_PATH = args.model
@@ -144,6 +148,23 @@ USE_CAMERA = args.source == 'camera'
 SOURCE_VIDEO_PATH = args.video_path
 
 CAMERA_ID = args.camera_id
+
+# Initialize GPS if requested
+gps_manager = None
+gps_info = "GPS: Disabled"
+
+if args.use_gps:
+    print("🛰️  GPS Integration Enabled")
+    gps_manager = GPSManager(port=args.gps_port, baudrate=args.gps_baud)
+    gps_success = gps_manager.initialize_gps()
+    if gps_success:
+        print("✅ GPS ready for location tagging")
+        gps_info = gps_manager.get_gps_info_text()
+    else:
+        print("⚠️  GPS initialization failed, continuing without GPS")
+        gps_manager = None
+else:
+    print("📍 GPS Disabled - Use --use-gps to enable")
 
 # Setup output paths
 BASE_NAME, TARGET_VIDEO_PATH, REPORT_PATH = setup_output_paths(SOURCE_VIDEO_PATH, args.save_video)
@@ -318,9 +339,17 @@ def filter_detections(detections):
         return sv.Detections.empty()
 
 def process_frame(frame: np.ndarray, frame_index: int = None) -> np.ndarray:
-    """Process a single frame for crack and pothole detection"""
+    """Process a single frame for crack and pothole detection with GPS info"""
 
     start_time = time.time()
+
+    # Get GPS coordinates for this detection if available
+    current_gps_info = ""
+    if gps_manager:
+        coords = gps_manager.get_coordinates()
+        if coords:
+            lat, lng = coords
+            current_gps_info = f"GPS: {lat:.6f}, {lng:.6f}"
 
     # Run inference - pass device_arg for ONNX / exported models
     # model(...) returns list of Result objects; results[0] is for this frame
@@ -385,7 +414,8 @@ def process_frame(frame: np.ndarray, frame_index: int = None) -> np.ndarray:
                 bbox=bbox.tolist(),
                 fps=video_info.fps or 30,
                 line_y_position=line_y_position,
-                video_info=video_info
+                video_info=video_info,
+                gps_info=current_gps_info  # Add GPS info to detection
             )
 
     # Update counters from exporter for display
@@ -416,6 +446,11 @@ def process_frame(frame: np.ndarray, frame_index: int = None) -> np.ndarray:
     cv2.putText(annotated_frame, device_text, (10, 170),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, device_color, 2)
 
+    # Add GPS info to overlay if available
+    if current_gps_info:
+        cv2.putText(annotated_frame, current_gps_info, (10, 195),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+
     # Draw detection line
     annotated_frame = cv2.line(annotated_frame,
                                (LINE_START.x, LINE_START.y),
@@ -432,13 +467,14 @@ def callback(frame: np.ndarray, index: int) -> np.ndarray:
 # Processing Loop
 # ---------------------------
 def process_camera_feed():
-    global cap
+    global cap, gps_manager, gps_info
     print(f"Processing camera feed from Camera {CAMERA_ID}")
     print(f"Model: {MODEL_PATH}")
     print(f"Device: {DEVICE_STR} (device_arg={device_arg})")
     print(f"Line position: Y={line_y_position} (55% from top)")
     print(f"Resolution: {video_info.width}x{video_info.height}")
     print(f"FPS: {video_info.fps}")
+    print(f"📍 {gps_info}")
     print("Press 'q' to quit, 's' to save current frame")
     print("-" * 60)
 
@@ -503,6 +539,14 @@ def process_camera_feed():
                 current_fps = 1.0 / frame_time
                 detection_exporter.add_fps_sample(current_fps)
 
+            # Update GPS position if available
+            if gps_manager:
+                gps_manager.update_position()
+                coords = gps_manager.get_coordinates()
+                if coords:
+                    lat, lng = coords
+                    gps_info = f"GPS: {lat:.6f}, {lng:.6f}"
+
             processed_frame = process_frame(frame, frame_count)
 
             if video_writer:
@@ -529,6 +573,10 @@ def process_camera_feed():
             video_writer.release()
         cap.release()
         cv2.destroyAllWindows()
+
+    # Close GPS connection if it was opened
+    if gps_manager:
+        gps_manager.close()
 
     return time.time() - start_processing_time, frame_count
 
@@ -572,6 +620,10 @@ if __name__ == "__main__":
 
     # Get final summary from exporter
     final_summary = detection_exporter.get_detection_summary()
+
+    # Final GPS update if available
+    if gps_manager:
+        gps_manager.update_position()
 
     # Summary
     print("\n" + "="*60)

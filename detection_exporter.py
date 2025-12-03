@@ -105,7 +105,7 @@ class DetectionExporter:
     def add_detection(self, annotated_frame: np.ndarray, frame_index: int,
                      tracker_id: int, class_name: str, confidence: float,
                      bbox: List[float], fps: float, line_y_position: int,
-                     video_info: Any = None):
+                     video_info: Any = None, gps_info: str = ""):
         """Add a detection to the export data"""
 
         # Check if this tracker was already processed
@@ -139,7 +139,8 @@ class DetectionExporter:
             "center_point": [int((bbox[0] + bbox[2]) / 2), bbox_center_y],
             "frame_image": frame_filename if frame_filename else "",
             "detection_type": "detected_below_line",
-            "line_position": line_y_position
+            "line_position": line_y_position,
+            "gps_info": gps_info
         }
 
         # Add to detections array
