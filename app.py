@@ -114,14 +114,15 @@ def setup_output_paths(source_path, save_video_flag):
         print(f"📁 Created output folder: {output_folder}")
 
     # Generate base filename using same format as DetectionExporter
+    from config import PROJECT_START_TIME
+
     if args.source == 'camera':
-        video_filename = f"camera_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        # For camera mode, use PROJECT_START_TIME like video file mode
+        video_filename = f"camera_{PROJECT_START_TIME}"
     else:
         # Extract filename without extension
         video_filename = os.path.splitext(os.path.basename(source_path))[0]
 
-    # Use same timestamp format as DetectionExporter
-    from config import PROJECT_START_TIME
     base_name = f"{video_filename}-{PROJECT_START_TIME}"
 
     # Create subfolder for videos
@@ -142,10 +143,10 @@ def setup_output_paths(source_path, save_video_flag):
 USE_CAMERA = args.source == 'camera'
 SOURCE_VIDEO_PATH = args.video_path
 
+CAMERA_ID = args.camera_id
+
 # Setup output paths
 BASE_NAME, TARGET_VIDEO_PATH, REPORT_PATH = setup_output_paths(SOURCE_VIDEO_PATH, args.save_video)
-
-CAMERA_ID = args.camera_id
 
 def initialize_jetson_camera():
     """Initialize camera with Jetson optimizations"""
@@ -234,8 +235,9 @@ LINE_END = sv.Point(video_info.width, line_y_position)
 # Initialize Detection Exporter
 # ---------------------------
 if USE_CAMERA:
-    # For camera mode, use a generic camera identifier
-    camera_source_path = f"camera_{CAMERA_ID}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    # For camera mode, use simple camera filename to let DetectionExporter add timestamp
+    from config import PROJECT_START_TIME
+    camera_source_path = f"camera_{PROJECT_START_TIME}.mp4"
 else:
     camera_source_path = SOURCE_VIDEO_PATH
 
@@ -442,10 +444,46 @@ def process_camera_feed():
 
     video_writer = None
     if args.save_video and TARGET_VIDEO_PATH:
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        video_writer = cv2.VideoWriter(TARGET_VIDEO_PATH, fourcc, video_info.fps,
-                                       (video_info.width, video_info.height))
-        print(f"📹 Saving video to: {TARGET_VIDEO_PATH}")
+        # Try codec with fallback options optimized for ARM/Jetson systems
+        print("🔧 Attempting to initialize camera video writer...")
+        codec_success = False
+
+        # Use MJPG as default (most compatible), will convert to H.264 later
+        codec_options = [
+            ('MJPG', 'MJPG codec'),
+            ('mp4v', 'mp4v codec'),
+            ('DIVX', 'DIVX codec'),
+            ('MP4V', 'MP4V codec'),
+            ('XVID', 'XVID codec'),
+        ]
+
+        for codec_code, codec_name in codec_options:
+            try:
+                print(f"🔍 Trying {codec_name}...")
+                fourcc = cv2.VideoWriter_fourcc(*codec_code)
+                test_writer = cv2.VideoWriter(TARGET_VIDEO_PATH, fourcc, video_info.fps,
+                                              (video_info.width, video_info.height))
+
+                # Test if writer actually works by checking if it opened
+                if test_writer.isOpened():
+                    test_writer.release()
+                    video_writer = cv2.VideoWriter(TARGET_VIDEO_PATH, fourcc, video_info.fps,
+                                                   (video_info.width, video_info.height))
+                    print(f"✅ Camera video writer initialized successfully with {codec_name}")
+                    print(f"📹 Saving video to: {TARGET_VIDEO_PATH} (Using {codec_name})")
+                    codec_success = True
+                    break
+                else:
+                    test_writer.release()
+                    print(f"⚠️ {codec_name}: Writer not opened")
+
+            except Exception as e:
+                print(f"⚠️ {codec_name} failed: {e}")
+
+        if not codec_success:
+            print("❌ All video codecs failed. Camera video will not be saved.")
+            print("💡 Consider installing: sudo apt-get install ffmpeg libavcodec-dev")
+            video_writer = None
 
     frame_count = 0
     start_processing_time = time.time()
@@ -504,7 +542,7 @@ if __name__ == "__main__":
     else:
         # Process video file using supervision.process_video wrapper (uses callback)
         print(f"🎥 Processing video: {SOURCE_VIDEO_PATH}")
-        print(f"📁 Output folder: outputs/videos/")
+        print("📁 Output folder: outputs/videos/")
         if TARGET_VIDEO_PATH:
             print(f"📹 Output video: {TARGET_VIDEO_PATH}")
         print(f"📄 Output report: {REPORT_PATH}")
@@ -567,7 +605,47 @@ if __name__ == "__main__":
     print(f"📋 Summary Report: {summary_path}")
     print("="*60)
 
+    # Convert to H.264 if video was saved and ffmpeg is available
+    if TARGET_VIDEO_PATH and os.path.exists(TARGET_VIDEO_PATH):
+        print(f"🎥 Annotated video saved to: {TARGET_VIDEO_PATH}")
+
+        # Create H.264 version using ffmpeg
+        try:
+            temp_h264 = TARGET_VIDEO_PATH.replace('.mp4', '_temp_h264.mp4')
+            print(f"🔄 Converting to H.264: {TARGET_VIDEO_PATH}")
+
+            # Use ffmpeg for conversion to H.264
+            import subprocess
+            cmd = [
+                'ffmpeg', '-i', TARGET_VIDEO_PATH,
+                '-c:v', 'libx264', '-preset', 'medium',
+                '-crf', '23', '-c:a', 'copy',
+                '-y', temp_h264
+            ]
+
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0 and os.path.exists(temp_h264):
+                # Get sizes before replacement
+                original_size = os.path.getsize(TARGET_VIDEO_PATH) / (1024*1024)
+                h264_size = os.path.getsize(temp_h264) / (1024*1024)
+
+                # Remove original file and replace with H.264 version
+                os.remove(TARGET_VIDEO_PATH)
+                os.rename(temp_h264, TARGET_VIDEO_PATH)
+
+                print(f"✅ H.264 conversion successful: {TARGET_VIDEO_PATH}")
+                print("📊 File size comparison:")
+                print(f"   Original: {original_size:.1f} MB")
+                print(f"   H.264: {h264_size:.1f} MB")
+                print(f"   Compression: {((original_size - h264_size) / original_size * 100):.1f}% smaller")
+            else:
+                print(f"⚠️ FFmpeg conversion failed: {result.stderr}")
+                # Clean up temp file if it exists
+                if os.path.exists(temp_h264):
+                    os.remove(temp_h264)
+        except Exception as e:
+            print(f"⚠️ FFmpeg not available or conversion failed: {e}")
+            print("💡 Install ffmpeg with: sudo apt-get install ffmpeg")
+
     # Final message - reports already saved by DetectionExporter
     print("✅ All reports and data files have been generated successfully!")
-    if TARGET_VIDEO_PATH and not USE_CAMERA:
-        print(f"🎥 Annotated video saved to: {TARGET_VIDEO_PATH}")

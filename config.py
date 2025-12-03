@@ -16,10 +16,13 @@ def get_project_paths(video_path):
     """Generate project-specific paths based on video filename"""
     video_filename = os.path.splitext(os.path.basename(video_path))[0]
 
+    # Simple: always use PROJECT_START_TIME timestamp
+    base_name = f"{video_filename}-{PROJECT_START_TIME}"
+
     return {
-        "json_filename": f"{video_filename}-{PROJECT_START_TIME}_detections.json",
+        "json_filename": f"{base_name}_detections.json",
         "captures_folder": CAPTURES_FOLDER,
-        "frame_prefix": f"{video_filename}-{PROJECT_START_TIME}"
+        "frame_prefix": base_name
     }
 
 # Ensure output folders exist
