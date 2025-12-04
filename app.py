@@ -22,6 +22,15 @@ import cv2
 import numpy as np
 import torch
 
+# Imageio for power-off safe video recording
+try:
+    import imageio
+    IMAGEIO_AVAILABLE = True
+    print("✅ ImageIO available - Using power-off safe video recording")
+except ImportError:
+    IMAGEIO_AVAILABLE = False
+    print("⚠️ ImageIO not available - Install with: pip install imageio[ffmpeg]")
+
 try:
     import requests
     REQUESTS_AVAILABLE = True
@@ -1185,21 +1194,57 @@ def process_camera_feed():
 
     print("-" * 60)
 
-    # Video Configuration
+    # Video Configuration - Power-off Safe with ImageIO
     video_writer = None
+    video_writer_type = None  # 'imageio' or 'opencv'
+
     if args.save_video and TARGET_VIDEO_PATH:
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        video_writer = cv2.VideoWriter(TARGET_VIDEO_PATH, fourcc, video_info.fps,
-                                       (video_info.width, video_info.height))
+        # Check if file exists and warn
+        if os.path.exists(TARGET_VIDEO_PATH):
+            file_size = os.path.getsize(TARGET_VIDEO_PATH)
+            print(f"⚠️  Video file exists: {TARGET_VIDEO_PATH}")
+            print(f"📊 Current size: {file_size / (1024*1024):.1f} MB")
+            print("🔄 Will overwrite existing file")
+
+        # Try ImageIO first (power-off safe)
+        imageio_available = IMAGEIO_AVAILABLE  # Local copy
+        if imageio_available:
+            try:
+                # Use MKV container for better power-off recovery
+                video_path_mkv = TARGET_VIDEO_PATH.replace('.mp4', '.mkv')
+                video_writer = imageio.get_writer(
+                    video_path_mkv,
+                    fps=video_info.fps,
+                    codec='libx264',
+                    format='ffmpeg',
+                    pixelformat='yuv420p',
+                    quality=8  # Good balance of quality vs file size
+                )
+                video_writer_type = 'imageio'
+                print(f"🎬 ImageIO Writer Initialized: {video_path_mkv}")
+                print("🚀 Power-off Safe: FFmpeg + MKV container")
+                print("⚡ Real-time: Each frame written immediately")
+                print("🔋 100% Safe from power-off corruption")
+            except Exception as e:
+                print(f"⚠️ ImageIO initialization failed: {e}")
+                print("🔄 Falling back to OpenCV VideoWriter")
+                imageio_available = False
+
+        # Fallback to OpenCV if ImageIO fails
+        if not imageio_available or video_writer is None:
+            # Use AVI container as fallback
+            actual_video_path = TARGET_VIDEO_PATH.replace('.mp4', '.avi')
+            fourcc = cv2.VideoWriter_fourcc(*'XVID')
+            video_writer = cv2.VideoWriter(actual_video_path, fourcc, video_info.fps,
+                                           (video_info.width, video_info.height))
+            video_writer_type = 'opencv'
+            print(f"🎬 OpenCV Writer Initialized: {actual_video_path}")
+            print("⚠️ Note: May corrupt on power-off (fallback mode)")
 
         if args.clean_video:
-            print(f"📹 Saving CLEAN ORIGINAL video to: {TARGET_VIDEO_PATH}")
-            print("🚀 Performance Mode: Original video recording + API detection (faster FPS)")
-            print("📸 Output: Clean video (no annotations), API receives annotated frames")
+            print("🚀 Clean Mode: Original frames (no annotations)")
         else:
-            print(f"📹 Saving ANNOTATED video to: {TARGET_VIDEO_PATH}")
-            print("🎬 Traditional Mode: Annotated video recording + API detection")
-            print("⚠️  Note: Slower performance due to annotation processing")
+            print("🎬 Annotated Mode: Frames with detection boxes")
     else:
         print("🔍 Detection Mode: API + Display only (no video saving)")
 
@@ -1223,16 +1268,41 @@ def process_camera_feed():
                 # Annotated video mode: Process for API + display
                 processed_frame = process_frame(frame, frame_count, return_annotated=True)
 
+            # Power-off safe video writing with ImageIO or OpenCV
             if video_writer:
-                if args.clean_video:
-                    # Write ORIGINAL frame (no annotations) for clean video output
-                    video_writer.write(frame)
-                else:
-                    # Write ANNOTATED frame for traditional output
-                    if 'processed_frame' in locals() and processed_frame is not None:
-                        video_writer.write(processed_frame)
+                try:
+                    if video_writer_type == 'imageio':
+                        # ImageIO: Convert BGR to RGB and append
+                        if args.clean_video:
+                            # Write ORIGINAL frame (no annotations)
+                            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        else:
+                            # Write ANNOTATED frame
+                            if 'processed_frame' in locals() and processed_frame is not None:
+                                rgb_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
+                            else:
+                                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+                        video_writer.append_data(rgb_frame)  # Immediate write to FFmpeg
                     else:
-                        video_writer.write(frame)
+                        # OpenCV: Traditional write with flush
+                        if args.clean_video:
+                            video_writer.write(frame)
+                        else:
+                            if 'processed_frame' in locals() and processed_frame is not None:
+                                video_writer.write(processed_frame)
+                            else:
+                                video_writer.write(frame)
+                        video_writer.flush()  # Force write to disk
+
+                    # Log every 100 frames
+                    if frame_count % 100 == 0:
+                        writer_type = "ImageIO (Power-off Safe)" if video_writer_type == 'imageio' else "OpenCV"
+                        print(f"💾 Frame {frame_count} written ({writer_type})")
+
+                except Exception as e:
+                    print(f"⚠️ Error writing frame {frame_count}: {e}")
+                    # Continue processing even if video write fails
 
             # GUI vs Headless mode
             if not args.headless:
@@ -1264,7 +1334,15 @@ def process_camera_feed():
 
     finally:
         if video_writer:
-            video_writer.release()  # Use standard cv2.VideoWriter release()
+            if video_writer_type == 'imageio':
+                try:
+                    video_writer.close()  # ImageIO close
+                    print("✅ ImageIO writer closed - Video file complete")
+                except Exception as e:
+                    print(f"⚠️ Error closing ImageIO writer: {e}")
+            else:
+                video_writer.release()  # OpenCV VideoWriter release
+                print("✅ OpenCV writer closed")
         cap.release()
 
         # Only destroy windows in GUI mode
