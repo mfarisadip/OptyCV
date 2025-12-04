@@ -62,6 +62,8 @@ parser.add_argument('--conf', type=float, default=0.4, help='Confidence threshol
 parser.add_argument('--iou', type=float, default=0.3, help='NMS IoU threshold')
 parser.add_argument('--vehicle-token', type=str, default=None,
                     help='Vehicle token for API authentication. If provided, API submission is automatically enabled.')
+parser.add_argument('--clean-video', action='store_true',
+                    help='Save clean original video without annotations (faster performance)')
 args = parser.parse_args()
 
 MODEL_PATH = args.model
@@ -698,13 +700,22 @@ if USE_CAMERA:
         print(f"Error: Cannot initialize camera {CAMERA_ID}")
         exit(1)
 
+    # Get native camera resolution for video writer
     actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps == 0 or np.isnan(fps):
         fps = 30
-    video_info = sv.VideoInfo(width=width, height=height, fps=fps, total_frames=None)
-    print(f"Camera {CAMERA_ID} opened: {width}x{height} @ {fps} FPS")
+
+    # Video writer uses NATIVE camera resolution for quality output
+    video_info = sv.VideoInfo(width=actual_width, height=actual_height, fps=fps, total_frames=None)
+
+    # Detection resolution (smaller for performance)
+    detection_width, detection_height = 640, 360
+
+    print(f"Camera {CAMERA_ID} opened: {actual_width}x{actual_height} @ {fps} FPS")
+    print(f"🎥 Video Output: {actual_width}x{actual_height} (Native Resolution)")
+    print(f"🔍 Detection Resolution: {detection_width}x{detection_height} (Fast Processing)")
 else:
     if not os.path.exists(SOURCE_VIDEO_PATH):
         print(f"Error: video file '{SOURCE_VIDEO_PATH}' not found.")
@@ -712,10 +723,24 @@ else:
     video_info = sv.VideoInfo.from_video_path(SOURCE_VIDEO_PATH)
     print(f"Video loaded: {SOURCE_VIDEO_PATH} -> {video_info.width}x{video_info.height} @ {video_info.fps} FPS, total {video_info.total_frames} frames")
 
-# line position (55% from top)
-line_y_position = int(video_info.height * 0.55)
-LINE_START = sv.Point(0, line_y_position)
-LINE_END = sv.Point(video_info.width, line_y_position)
+# line position (55% from top) - use detection resolution for line calculation
+if USE_CAMERA:
+    # For camera mode, use detection resolution for line detection
+    detection_line_y = int(detection_height * 0.55)
+    # Scale to actual frame coordinates for annotation
+    line_y_position = int(actual_height * 0.55)
+    LINE_START = sv.Point(0, line_y_position)
+    LINE_END = sv.Point(actual_width, line_y_position)
+
+    print(f"📍 Detection Line: Y={detection_line_y} (55% of detection height)")
+    print(f"📍 Annotation Line: Y={line_y_position} (55% of actual height)")
+else:
+    # For video mode, use video resolution
+    line_y_position = int(video_info.height * 0.55)
+    LINE_START = sv.Point(0, line_y_position)
+    LINE_END = sv.Point(video_info.width, line_y_position)
+    # Set detection resolution untuk video mode
+    detection_width, detection_height = video_info.width, video_info.height
 
 # ---------------------------
 # Load YOLO model (ONNX or PT)
@@ -863,23 +888,44 @@ def send_detection_async(detection_type, class_name, confidence, timestamp, fram
         thread.start()
 
 
-def process_frame(frame: np.ndarray, frame_index: int = None) -> np.ndarray:
-    """Process a single frame for crack and pothole detection"""
+def process_frame(frame: np.ndarray, frame_index: int = None, return_annotated: bool = True) -> np.ndarray:
+    """Process a single frame for crack and pothole detection with dual-resolution optimization
+
+    Args:
+        frame: Input frame to process
+        frame_index: Frame index for logging
+        return_annotated: If True, returns annotated frame for display; if False, returns None for performance
+    """
     global pothole_count, crack_count, alligator_cracking_count, lateral_cracking_count, longitudinal_cracking_count, rutting_count, detection_log, processed_trackers
 
     start_time = time.time()
 
-    # Run inference - pass device_arg for ONNX / exported models
-    # model(...) returns list of Result objects; results[0] is for this frame
+    # Dual-resolution optimization: detect on small frame, annotate on original frame
+    if USE_CAMERA and (frame.shape[1] != detection_width or frame.shape[0] != detection_height):
+        # Resize frame for detection (faster processing)
+        detection_frame = cv2.resize(frame, (detection_width, detection_height))
+    else:
+        # Use original frame for detection (video mode or already correct size)
+        detection_frame = frame
+
+    # Run inference on optimized frame size
     try:
-        results = model(frame, conf=CONF_THRESHOLD, iou=IOU_THRESHOLD, verbose=False, device=device_arg)
+        results = model(detection_frame, conf=CONF_THRESHOLD, iou=IOU_THRESHOLD, verbose=False, device=device_arg)
     except Exception as e:
         # Fallback: try without device_arg (some runtimes accept 'cpu'/'cuda:0')
         print(f"⚠️ Inference call with device_arg failed: {e}. Retrying without explicit device...")
-        results = model(frame, conf=CONF_THRESHOLD, iou=IOU_THRESHOLD, verbose=False)
+        results = model(detection_frame, conf=CONF_THRESHOLD, iou=IOU_THRESHOLD, verbose=False)
 
     # Convert to supervision detections
     detections = sv.Detections.from_ultralytics(results[0])
+
+    # Scale detections back to original frame size if we used resized detection frame
+    if USE_CAMERA and (frame.shape[1] != detection_width or frame.shape[0] != detection_height):
+        scale_x = frame.shape[1] / detection_width
+        scale_y = frame.shape[0] / detection_height
+
+        if len(detections.xyxy) > 0:
+            detections.xyxy = detections.xyxy * np.array([scale_x, scale_y, scale_x, scale_y])
 
     # Filter to desired classes
     detections = filter_detections(detections)
@@ -902,22 +948,30 @@ def process_frame(frame: np.ndarray, frame_index: int = None) -> np.ndarray:
             class_name = model.names[class_id] if class_id in model.names else str(class_id)
             labels.append(f"{class_name} {confidence:0.2f}")
 
-    # Annotate traces, boxes, labels
-    # Optimization: Use frame directly without copy
-    annotated_frame = trace_annotator.annotate(scene=frame, detections=detections)
-    annotated_frame = box_annotator.annotate(scene=annotated_frame, detections=detections)
-    annotated_frame = label_annotator.annotate(scene=annotated_frame, detections=detections, labels=labels)
-
     # Timestamp for logs
     timestamp = get_timestamp(frame_index, video_info.fps) if frame_index is not None else "LIVE"
-
-    # Optimization: Lazy encoding of image for API
-    encoded_jpg_bytes = None
 
     # Get GPS position for detection API calls
     gps_position = gps_manager.get_position()
     gps_latitude = gps_position['latitude']
     gps_longitude = gps_position['longitude']
+
+    # Create annotated frame for API (always needed when API is enabled)
+    annotated_frame = None
+    encoded_jpg_bytes = None
+
+    if API_ENABLED or return_annotated:
+        # Always create annotated frame for API, optionally for display
+        annotated_frame = trace_annotator.annotate(scene=frame, detections=detections)
+        annotated_frame = box_annotator.annotate(scene=annotated_frame, detections=detections)
+        annotated_frame = label_annotator.annotate(scene=annotated_frame, detections=detections, labels=labels)
+
+        # Optimization: Lazy encoding of image for API
+        # Only encode if API is enabled and we have detections
+        if API_ENABLED and len(detections) > 0:
+            success, buf = cv2.imencode('.jpg', annotated_frame)
+            if success:
+                encoded_jpg_bytes = buf.tobytes()
 
     # Check objects below the line and log new trackers
     if hasattr(detections, 'tracker_id') and detections.tracker_id is not None:
@@ -927,8 +981,19 @@ def process_frame(frame: np.ndarray, frame_index: int = None) -> np.ndarray:
             if tracker_id not in processed_trackers:
                 bbox = detections.xyxy[i]
                 center_y = int((bbox[1] + bbox[3]) / 2)
+
+                # For dual-resolution mode, use correct line position
+                if USE_CAMERA:
+                    # Convert center_y to detection coordinates for line checking
+                    detection_center_y = int(center_y * (detection_height / frame.shape[0]))
+                    line_check_y = detection_line_y
+                else:
+                    # Video mode: use original coordinates
+                    detection_center_y = center_y
+                    line_check_y = line_y_position
+
                 # check if object center is below line
-                if center_y >= line_y_position:
+                if detection_center_y >= line_check_y:
                     class_id = int(detections.class_id[i])
                     class_name = model.names[class_id].lower() if class_id in model.names else "unknown"
                     confidence = float(detections.confidence[i])
@@ -945,14 +1010,9 @@ def process_frame(frame: np.ndarray, frame_index: int = None) -> np.ndarray:
                             'confidence': confidence,
                             'detection_type': 'detected_below_line'
                         })
-                        print(f"🕳️ POTHOLE #{pothole_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Conf:{confidence:.2f})")
+                        print(f"🕳️ POTHOLE #{pothole_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Line:{line_check_y}, Conf:{confidence:.2f})")
                         
-                        # Encode image only if needed and not yet encoded
-                        if API_ENABLED and encoded_jpg_bytes is None:
-                            success, buf = cv2.imencode('.jpg', annotated_frame)
-                            if success:
-                                encoded_jpg_bytes = buf.tobytes()
-
+                        
                         # Send to API
                         send_detection_async('pothole', 'pothole', confidence, timestamp,
                                            frame_index if frame_index is not None else 0, timestamp, encoded_jpg_bytes, gps_latitude, gps_longitude)
@@ -968,14 +1028,9 @@ def process_frame(frame: np.ndarray, frame_index: int = None) -> np.ndarray:
                             'confidence': confidence,
                             'detection_type': 'detected_below_line'
                         })
-                        print(f"🐊 ALLIGATOR CRACKING #{alligator_cracking_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Conf:{confidence:.2f})")
+                        print(f"🐊 ALLIGATOR CRACKING #{alligator_cracking_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Line:{line_check_y}, Conf:{confidence:.2f})")
                         
-                        # Encode image only if needed and not yet encoded
-                        if API_ENABLED and encoded_jpg_bytes is None:
-                            success, buf = cv2.imencode('.jpg', annotated_frame)
-                            if success:
-                                encoded_jpg_bytes = buf.tobytes()
-
+                        
                         # Send to API
                         send_detection_async('alligator_cracking', 'alligator cracking', confidence, timestamp,
                                            frame_index if frame_index is not None else 0, timestamp, encoded_jpg_bytes, gps_latitude, gps_longitude)
@@ -991,14 +1046,9 @@ def process_frame(frame: np.ndarray, frame_index: int = None) -> np.ndarray:
                             'confidence': confidence,
                             'detection_type': 'detected_below_line'
                         })
-                        print(f"↔️ LATERAL CRACKING #{lateral_cracking_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Conf:{confidence:.2f})")
+                        print(f"↔️ LATERAL CRACKING #{lateral_cracking_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Line:{line_check_y}, Conf:{confidence:.2f})")
                         
-                        # Encode image only if needed and not yet encoded
-                        if API_ENABLED and encoded_jpg_bytes is None:
-                            success, buf = cv2.imencode('.jpg', annotated_frame)
-                            if success:
-                                encoded_jpg_bytes = buf.tobytes()
-
+                        
                         # Send to API
                         send_detection_async('lateral_cracking', 'lateral cracking', confidence, timestamp,
                                            frame_index if frame_index is not None else 0, timestamp, encoded_jpg_bytes, gps_latitude, gps_longitude)
@@ -1014,14 +1064,9 @@ def process_frame(frame: np.ndarray, frame_index: int = None) -> np.ndarray:
                             'confidence': confidence,
                             'detection_type': 'detected_below_line'
                         })
-                        print(f"↕️ LONGITUDINAL CRACKING #{longitudinal_cracking_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Conf:{confidence:.2f})")
+                        print(f"↕️ LONGITUDINAL CRACKING #{longitudinal_cracking_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Line:{line_check_y}, Conf:{confidence:.2f})")
                         
-                        # Encode image only if needed and not yet encoded
-                        if API_ENABLED and encoded_jpg_bytes is None:
-                            success, buf = cv2.imencode('.jpg', annotated_frame)
-                            if success:
-                                encoded_jpg_bytes = buf.tobytes()
-
+                        
                         # Send to API
                         send_detection_async('longitudinal_cracking', 'longitudinal cracking', confidence, timestamp,
                                            frame_index if frame_index is not None else 0, timestamp, encoded_jpg_bytes, gps_latitude, gps_longitude)
@@ -1037,14 +1082,9 @@ def process_frame(frame: np.ndarray, frame_index: int = None) -> np.ndarray:
                             'confidence': confidence,
                             'detection_type': 'detected_below_line'
                         })
-                        print(f"🛤️  RUTTING #{rutting_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Conf:{confidence:.2f})")
+                        print(f"🛤️  RUTTING #{rutting_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Line:{line_check_y}, Conf:{confidence:.2f})")
                         
-                        # Encode image only if needed and not yet encoded
-                        if API_ENABLED and encoded_jpg_bytes is None:
-                            success, buf = cv2.imencode('.jpg', annotated_frame)
-                            if success:
-                                encoded_jpg_bytes = buf.tobytes()
-
+                        
                         # Send to API
                         send_detection_async('rutting', 'rutting', confidence, timestamp,
                                            frame_index if frame_index is not None else 0, timestamp, encoded_jpg_bytes, gps_latitude, gps_longitude)
@@ -1060,21 +1100,16 @@ def process_frame(frame: np.ndarray, frame_index: int = None) -> np.ndarray:
                             'confidence': confidence,
                             'detection_type': 'detected_below_line'
                         })
-                        print(f"〰️ CRACK #{crack_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Conf:{confidence:.2f})")
+                        print(f"〰️ CRACK #{crack_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Line:{line_check_y}, Conf:{confidence:.2f})")
                         
-                        # Encode image only if needed and not yet encoded
-                        if API_ENABLED and encoded_jpg_bytes is None:
-                            success, buf = cv2.imencode('.jpg', annotated_frame)
-                            if success:
-                                encoded_jpg_bytes = buf.tobytes()
-
+                        
                         # Send to API
                         send_detection_async('crack', 'crack', confidence, timestamp,
                                            frame_index if frame_index is not None else 0, timestamp, encoded_jpg_bytes, gps_latitude, gps_longitude)
 
                     processed_trackers.add(tracker_id)
 
-    # Overlay stats text
+    # Overlay stats text only if we have an annotated frame
     processing_time = time.time() - start_time
     if frame_index is not None and video_info.total_frames:
         frame_text = f'Frame: {frame_index}/{video_info.total_frames}'
@@ -1084,41 +1119,45 @@ def process_frame(frame: np.ndarray, frame_index: int = None) -> np.ndarray:
         # Calculate total cracks (all crack types combined)
     total_cracks = alligator_cracking_count + lateral_cracking_count + longitudinal_cracking_count + rutting_count + crack_count
 
-    cv2.putText(annotated_frame, frame_text, (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-    cv2.putText(annotated_frame, f'Potholes: {pothole_count}', (10, 60),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-    cv2.putText(annotated_frame, f'Cracks: {total_cracks}', (10, 90),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 165, 0), 2)
-    cv2.putText(annotated_frame, f'Time: {timestamp}', (10, 120),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-    cv2.putText(annotated_frame, f'Process: {processing_time:.3f}s', (10, 145),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    # Only overlay text if annotated_frame exists and return_annotated is True
+    if annotated_frame is not None and return_annotated:
+        cv2.putText(annotated_frame, frame_text, (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv2.putText(annotated_frame, f'Potholes: {pothole_count}', (10, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+        cv2.putText(annotated_frame, f'Cracks: {total_cracks}', (10, 90),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 165, 0), 2)
+        cv2.putText(annotated_frame, f'Time: {timestamp}', (10, 120),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(annotated_frame, f'Process: {processing_time:.3f}s', (10, 145),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-    device_text = f'Device: {DEVICE_STR.upper()}'
-    device_color = (0, 255, 0) if DEVICE_STR.startswith('cuda') else (0, 165, 255)
-    cv2.putText(annotated_frame, device_text, (10, 170),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, device_color, 2)
+        device_text = f'Device: {DEVICE_STR.upper()}'
+        device_color = (0, 255, 0) if DEVICE_STR.startswith('cuda') else (0, 165, 255)
+        cv2.putText(annotated_frame, device_text, (10, 170),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, device_color, 2)
 
-    # GPS coordinates display
-    gps_position = gps_manager.get_position()
-    if gps_position['latitude'] != 0.0 or gps_position['longitude'] != 0.0:
-        gps_text = f'GPS: {gps_position["latitude"]:.6f}, {gps_position["longitude"]:.6f}'
-        gps_color = (0, 255, 0)
+        # GPS coordinates display
+        if gps_position['latitude'] != 0.0 or gps_position['longitude'] != 0.0:
+            gps_text = f'GPS: {gps_position["latitude"]:.6f}, {gps_position["longitude"]:.6f}'
+            gps_color = (0, 255, 0)
+        else:
+            gps_text = 'GPS: No Signal'
+            gps_color = (0, 0, 255)  # Red for no signal
+
+        cv2.putText(annotated_frame, gps_text, (10, 195),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, gps_color, 2)
+
+        # Draw detection line
+        annotated_frame = cv2.line(annotated_frame,
+                                   (LINE_START.x, LINE_START.y),
+                                   (LINE_END.x, LINE_END.y),
+                                   (255, 255, 0), 2)
+
+        return annotated_frame
     else:
-        gps_text = 'GPS: No Signal'
-        gps_color = (0, 0, 255)  # Red for no signal
-
-    cv2.putText(annotated_frame, gps_text, (10, 195),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, gps_color, 2)
-
-    # Draw detection line
-    annotated_frame = cv2.line(annotated_frame,
-                               (LINE_START.x, LINE_START.y),
-                               (LINE_END.x, LINE_END.y),
-                               (255, 255, 0), 2)
-
-    return annotated_frame
+        # Performance mode: don't return annotated frame
+        return None
 
 # callback wrapper for sv.process_video (if used)
 def callback(frame: np.ndarray, index: int) -> np.ndarray:
@@ -1146,12 +1185,23 @@ def process_camera_feed():
 
     print("-" * 60)
 
+    # Video Configuration
     video_writer = None
     if args.save_video and TARGET_VIDEO_PATH:
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         video_writer = cv2.VideoWriter(TARGET_VIDEO_PATH, fourcc, video_info.fps,
                                        (video_info.width, video_info.height))
-        print(f"📹 Saving video to: {TARGET_VIDEO_PATH}")
+
+        if args.clean_video:
+            print(f"📹 Saving CLEAN ORIGINAL video to: {TARGET_VIDEO_PATH}")
+            print("🚀 Performance Mode: Original video recording + API detection (faster FPS)")
+            print("📸 Output: Clean video (no annotations), API receives annotated frames")
+        else:
+            print(f"📹 Saving ANNOTATED video to: {TARGET_VIDEO_PATH}")
+            print("🎬 Traditional Mode: Annotated video recording + API detection")
+            print("⚠️  Note: Slower performance due to annotation processing")
+    else:
+        print("🔍 Detection Mode: API + Display only (no video saving)")
 
     frame_count = 0
     start_processing_time = time.time()
@@ -1163,21 +1213,48 @@ def process_camera_feed():
                 print("Failed to grab frame from camera")
                 break
 
-            processed_frame = process_frame(frame, frame_count)
+            # Dual Pipeline:
+            # 1. Process frame for detection & API (clean video mode = faster, annotated mode = slower)
+            # 2. Write original frame to video (clean recording) or processed frame (annotated mode)
+            if args.clean_video:
+                # Clean video mode: Process for API only (no annotation overhead)
+                process_frame(frame, frame_count, return_annotated=False)
+            else:
+                # Annotated video mode: Process for API + display
+                processed_frame = process_frame(frame, frame_count, return_annotated=True)
 
             if video_writer:
-                video_writer.write(processed_frame)
+                if args.clean_video:
+                    # Write ORIGINAL frame (no annotations) for clean video output
+                    video_writer.write(frame)
+                else:
+                    # Write ANNOTATED frame for traditional output
+                    if 'processed_frame' in locals() and processed_frame is not None:
+                        video_writer.write(processed_frame)
+                    else:
+                        video_writer.write(frame)
 
             # GUI vs Headless mode
             if not args.headless:
-                # GUI Mode: Show display and handle keyboard input
-                cv2.imshow('Crack and Pothole Detection - Live Feed', processed_frame)
+                # GUI Mode: Always show annotated frame for display
+                if args.clean_video:
+                    # Need to process again for display (with annotations)
+                    display_frame = process_frame(frame, frame_count, return_annotated=True)
+                else:
+                    # Use already processed frame
+                    display_frame = processed_frame if 'processed_frame' in locals() and processed_frame is not None else frame
+
+                if display_frame is not None:
+                    cv2.imshow('Crack and Pothole Detection - Live Feed', display_frame)
+                else:
+                    # Fallback: show original frame if processing failed
+                    cv2.imshow('Crack and Pothole Detection - Live Feed', frame)
 
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
                     break
             else:
-                # Headless Mode: No display, process continuously
+                # Headless Mode: No display, just process for API
                 pass
 
             frame_count += 1
