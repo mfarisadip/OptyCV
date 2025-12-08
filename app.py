@@ -69,10 +69,16 @@ parser.add_argument('--model', type=str, default='weights/YOLOV8n320IR8.onnx',
                     help='Model path (can be .onnx or .pt). For ONNX use device arg at predict-time.')
 parser.add_argument('--conf', type=float, default=0.4, help='Confidence threshold')
 parser.add_argument('--iou', type=float, default=0.3, help='NMS IoU threshold')
+parser.add_argument('--top-line', type=float, default=0.43,
+                    help='Top line position as percentage from top (default: 0.43 = 43%)')
+parser.add_argument('--bottom-line', type=float, default=0.70,
+                    help='Bottom line position as percentage from top (default: 0.70 = 70%)')
 parser.add_argument('--vehicle-token', type=str, default=None,
                     help='Vehicle token for API authentication. If provided, API submission is automatically enabled.')
 parser.add_argument('--clean-video', action='store_true',
                     help='Save clean original video without annotations (faster performance)')
+parser.add_argument('--save-screenshots', action='store_true',
+                    help='Auto-save screenshots when detections occur (works in both GUI and headless mode)')
 args = parser.parse_args()
 
 MODEL_PATH = args.model
@@ -253,27 +259,43 @@ class GPSManager:
         return None
 
     def initialize_gps(self):
-        """Initialize GPS connection with fallback to multiple ports"""
+        """Initialize GPS connection with fallback to multiple ports and retry mechanism"""
         print("🛰️ Initializing GPS...")
 
-        for port in self.ports_to_try:
-            print(f"🔍 Trying GPS on {port}...")
-            self.serial_port = self.connect_to_port(port)
+        max_attempts = 10
+        attempt = 0
 
-            if self.serial_port:
-                # Reset and start GPS
-                self.send_at('AT+CGPS=0', 'OK', 1)
-                time.sleep(0.5)
-                success, _ = self.send_at('AT+CGPS=1', 'OK', 1)
+        while attempt < max_attempts:
+            attempt += 1
+            print(f"🔄 GPS connection attempt {attempt}/{max_attempts}")
 
-                if success:
-                    print(f"✅ GPS initialized on {port}")
-                    return True
-                else:
-                    self.serial_port.close()
-                    self.serial_port = None
+            for port in self.ports_to_try:
+                print(f"🔍 Trying GPS on {port}...")
+                self.serial_port = self.connect_to_port(port)
 
-        print("❌ Failed to initialize GPS on any port")
+                if self.serial_port:
+                    # Reset and start GPS
+                    self.send_at('AT+CGPS=0', 'OK', 1)
+                    time.sleep(0.5)
+                    success, _ = self.send_at('AT+CGPS=1', 'OK', 1)
+
+                    if success:
+                        print(f"✅ GPS initialized on {port}")
+                        return True
+                    else:
+                        self.serial_port.close()
+                        self.serial_port = None
+
+            if attempt < max_attempts:
+                print(f"⚠️ GPS connection failed, retrying in 2 seconds...")
+                time.sleep(2)
+
+        print(f"❌ GPS connection failed after {max_attempts} attempts!")
+        print("❌ ERROR: USB GPS not found or not connected!")
+        print("Please check:")
+        print("1. GPS device is connected to USB port")
+        print("2. USB device is detected by system")
+        print("3. USB serial ports are available")
         return False
 
     def gps_update_loop(self):
@@ -731,25 +753,33 @@ else:
         exit(1)
     video_info = sv.VideoInfo.from_video_path(SOURCE_VIDEO_PATH)
     print(f"Video loaded: {SOURCE_VIDEO_PATH} -> {video_info.width}x{video_info.height} @ {video_info.fps} FPS, total {video_info.total_frames} frames")
-
-# line position (55% from top) - use detection resolution for line calculation
-if USE_CAMERA:
-    # For camera mode, use detection resolution for line detection
-    detection_line_y = int(detection_height * 0.55)
-    # Scale to actual frame coordinates for annotation
-    line_y_position = int(actual_height * 0.55)
-    LINE_START = sv.Point(0, line_y_position)
-    LINE_END = sv.Point(actual_width, line_y_position)
-
-    print(f"📍 Detection Line: Y={detection_line_y} (55% of detection height)")
-    print(f"📍 Annotation Line: Y={line_y_position} (55% of actual height)")
-else:
-    # For video mode, use video resolution
-    line_y_position = int(video_info.height * 0.55)
-    LINE_START = sv.Point(0, line_y_position)
-    LINE_END = sv.Point(video_info.width, line_y_position)
     # Set detection resolution untuk video mode
     detection_width, detection_height = video_info.width, video_info.height
+
+# Dual line positions (adjustable) - use actual dimensions
+TOP_LINE_PERCENTAGE = args.top_line
+BOTTOM_LINE_PERCENTAGE = args.bottom_line
+
+if USE_CAMERA:
+    top_line_y = int(actual_height * TOP_LINE_PERCENTAGE)
+    bottom_line_y = int(actual_height * BOTTOM_LINE_PERCENTAGE)
+    # Calculate detection line positions (for zone checking on resized frames)
+    detection_top_line_y = int(detection_height * TOP_LINE_PERCENTAGE)
+    detection_bottom_line_y = int(detection_height * BOTTOM_LINE_PERCENTAGE)
+    print(f"🔍 Detection Resolution: {detection_width}x{detection_height}")
+    print(f"📍 Detection Zone: Y={detection_top_line_y} to Y={detection_bottom_line_y} (detection coords)")
+    print(f"📍 Annotation Zone: Y={top_line_y} to Y={bottom_line_y} (actual coords)")
+else:
+    # Video mode: use video resolution
+    top_line_y = int(video_info.height * TOP_LINE_PERCENTAGE)
+    bottom_line_y = int(video_info.height * BOTTOM_LINE_PERCENTAGE)
+    detection_top_line_y = top_line_y
+    detection_bottom_line_y = bottom_line_y
+
+# Keep backward compatibility with single line
+line_y_position = int((top_line_y + bottom_line_y) / 2)  # Middle line for backward compatibility
+LINE_START = sv.Point(0, line_y_position)
+LINE_END = sv.Point(video_info.width if not USE_CAMERA else actual_width, line_y_position)
 
 # ---------------------------
 # Load YOLO model (ONNX or PT)
@@ -896,6 +926,18 @@ def send_detection_async(detection_type, class_name, confidence, timestamp, fram
         )
         thread.start()
 
+def save_detection_screenshot(detection_type, detection_count, annotated_frame):
+    """
+    Save screenshot of detection if --save-screenshots is enabled.
+    """
+    if args.save_screenshots and annotated_frame is not None:
+        screenshot_folder = "output/screenshots"
+        if not os.path.exists(screenshot_folder):
+            os.makedirs(screenshot_folder)
+        screenshot_path = os.path.join(screenshot_folder, f"{detection_type}_{detection_count}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg")
+        cv2.imwrite(screenshot_path, annotated_frame)
+        print(f"   📸 Screenshot saved: {screenshot_path}")
+
 
 def process_frame(frame: np.ndarray, frame_index: int = None, return_annotated: bool = True) -> np.ndarray:
     """Process a single frame for crack and pothole detection with dual-resolution optimization
@@ -938,8 +980,36 @@ def process_frame(frame: np.ndarray, frame_index: int = None, return_annotated: 
 
     # Filter to desired classes
     detections = filter_detections(detections)
+    
+    # Store total detections before zone filtering
+    total_detections = len(detections)
+    
+    # Filter detections to ONLY show objects INSIDE the zone (between lines)
+    zone_indices = []
+    for i in range(len(detections)):
+        bbox = detections.xyxy[i]
+        center_y = int((bbox[1] + bbox[3]) / 2)
+        
+        # For dual-resolution mode, use correct line position
+        if USE_CAMERA:
+            # Convert center_y to detection coordinates for line checking
+            detection_center_y = int(center_y * (detection_height / frame.shape[0]))
+            if detection_top_line_y <= detection_center_y <= detection_bottom_line_y:
+                zone_indices.append(i)
+        else:
+            # Video mode: use original coordinates
+            if top_line_y <= center_y <= bottom_line_y:
+                zone_indices.append(i)
+    
+    # Keep only detections inside zone
+    if zone_indices:
+        detections = detections[zone_indices]
+    else:
+        detections = sv.Detections.empty()
+    
+    inside_zone_count = len(detections)
 
-    # Track detections
+    # Track detections (only those in zone)
     detections = byte_tracker.update_with_detections(detections)
 
     # Build labels
@@ -993,16 +1063,15 @@ def process_frame(frame: np.ndarray, frame_index: int = None, return_annotated: 
 
                 # For dual-resolution mode, use correct line position
                 if USE_CAMERA:
-                    # Convert center_y to detection coordinates for line checking
+                    # Convert center_y to detection coordinates for zone checking
                     detection_center_y = int(center_y * (detection_height / frame.shape[0]))
-                    line_check_y = detection_line_y
+                    in_zone = detection_top_line_y <= detection_center_y <= detection_bottom_line_y
                 else:
                     # Video mode: use original coordinates
-                    detection_center_y = center_y
-                    line_check_y = line_y_position
+                    in_zone = top_line_y <= center_y <= bottom_line_y
 
-                # check if object center is below line
-                if detection_center_y >= line_check_y:
+                # Only process objects that are inside the zone (between top and bottom lines)
+                if in_zone:
                     class_id = int(detections.class_id[i])
                     class_name = model.names[class_id].lower() if class_id in model.names else "unknown"
                     confidence = float(detections.confidence[i])
@@ -1019,8 +1088,8 @@ def process_frame(frame: np.ndarray, frame_index: int = None, return_annotated: 
                             'confidence': confidence,
                             'detection_type': 'detected_below_line'
                         })
-                        print(f"🕳️ POTHOLE #{pothole_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Line:{line_check_y}, Conf:{confidence:.2f})")
-                        
+                        print(f"🕳️ POTHOLE #{pothole_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Zone:{top_line_y}-{bottom_line_y}, Conf:{confidence:.2f})")
+                        save_detection_screenshot('pothole', pothole_count, annotated_frame)
                         
                         # Send to API
                         send_detection_async('pothole', 'pothole', confidence, timestamp,
@@ -1037,7 +1106,8 @@ def process_frame(frame: np.ndarray, frame_index: int = None, return_annotated: 
                             'confidence': confidence,
                             'detection_type': 'detected_below_line'
                         })
-                        print(f"🐊 ALLIGATOR CRACKING #{alligator_cracking_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Line:{line_check_y}, Conf:{confidence:.2f})")
+                        print(f"🐊 ALLIGATOR CRACKING #{alligator_cracking_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Zone:{top_line_y}-{bottom_line_y}, Conf:{confidence:.2f})")
+                        save_detection_screenshot('alligator_cracking', alligator_cracking_count, annotated_frame)
                         
                         
                         # Send to API
@@ -1055,7 +1125,8 @@ def process_frame(frame: np.ndarray, frame_index: int = None, return_annotated: 
                             'confidence': confidence,
                             'detection_type': 'detected_below_line'
                         })
-                        print(f"↔️ LATERAL CRACKING #{lateral_cracking_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Line:{line_check_y}, Conf:{confidence:.2f})")
+                        print(f"↔️ LATERAL CRACKING #{lateral_cracking_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Zone:{top_line_y}-{bottom_line_y}, Conf:{confidence:.2f})")
+                        save_detection_screenshot('lateral_cracking', lateral_cracking_count, annotated_frame)
                         
                         
                         # Send to API
@@ -1073,7 +1144,8 @@ def process_frame(frame: np.ndarray, frame_index: int = None, return_annotated: 
                             'confidence': confidence,
                             'detection_type': 'detected_below_line'
                         })
-                        print(f"↕️ LONGITUDINAL CRACKING #{longitudinal_cracking_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Line:{line_check_y}, Conf:{confidence:.2f})")
+                        print(f"↕️ LONGITUDINAL CRACKING #{longitudinal_cracking_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Zone:{top_line_y}-{bottom_line_y}, Conf:{confidence:.2f})")
+                        save_detection_screenshot('longitudinal_cracking', longitudinal_cracking_count, annotated_frame)
                         
                         
                         # Send to API
@@ -1091,7 +1163,8 @@ def process_frame(frame: np.ndarray, frame_index: int = None, return_annotated: 
                             'confidence': confidence,
                             'detection_type': 'detected_below_line'
                         })
-                        print(f"🛤️  RUTTING #{rutting_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Line:{line_check_y}, Conf:{confidence:.2f})")
+                        print(f"🛤️  RUTTING #{rutting_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Zone:{top_line_y}-{bottom_line_y}, Conf:{confidence:.2f})")
+                        save_detection_screenshot('rutting', rutting_count, annotated_frame)
                         
                         
                         # Send to API
@@ -1109,7 +1182,8 @@ def process_frame(frame: np.ndarray, frame_index: int = None, return_annotated: 
                             'confidence': confidence,
                             'detection_type': 'detected_below_line'
                         })
-                        print(f"〰️ CRACK #{crack_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Line:{line_check_y}, Conf:{confidence:.2f})")
+                        print(f"〰️ CRACK #{crack_count} (ID:#{tracker_id}) DETECTED at {timestamp} (Y:{center_y}, Zone:{top_line_y}-{bottom_line_y}, Conf:{confidence:.2f})")
+                        save_detection_screenshot('crack', crack_count, annotated_frame)
                         
                         
                         # Send to API
@@ -1156,12 +1230,26 @@ def process_frame(frame: np.ndarray, frame_index: int = None, return_annotated: 
 
         cv2.putText(annotated_frame, gps_text, (10, 195),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, gps_color, 2)
+        
+        # Add zone statistics
+        cv2.putText(annotated_frame, f'Total Detections: {total_detections}', (10, 220),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.putText(annotated_frame, f'Inside Zone: {inside_zone_count}', (10, 245),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
         # Draw detection line
-        annotated_frame = cv2.line(annotated_frame,
-                                   (LINE_START.x, LINE_START.y),
-                                   (LINE_END.x, LINE_END.y),
-                                   (255, 255, 0), 2)
+        # Get frame dimensions for drawing lines
+        frame_height, frame_width = annotated_frame.shape[:2]
+        
+        # Draw TOP line (yellow)
+        cv2.line(annotated_frame, (0, top_line_y), (frame_width, top_line_y), (0, 255, 255), 3)
+        cv2.putText(annotated_frame, 'TOP LINE', (frame_width - 150, top_line_y - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        
+        # Draw BOTTOM line (cyan)
+        cv2.line(annotated_frame, (0, bottom_line_y), (frame_width, bottom_line_y), (255, 255, 0), 3)
+        cv2.putText(annotated_frame, 'BOTTOM LINE', (frame_width - 200, bottom_line_y - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
         return annotated_frame
     else:
@@ -1190,7 +1278,7 @@ def process_camera_feed():
         print("Press Ctrl+C to stop")
     else:
         print("🖥️  Running in GUI mode")
-        print("Press 'q' to quit")
+        print("Press 'q' to quit, 's' to save screenshot")
 
     print("-" * 60)
 
@@ -1323,6 +1411,17 @@ def process_camera_feed():
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
                     break
+                elif key == ord('s'):
+                    # Save screenshot
+                    screenshot_folder = "output/screenshots"
+                    if not os.path.exists(screenshot_folder):
+                        os.makedirs(screenshot_folder)
+                    screenshot_path = os.path.join(screenshot_folder, f"screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg")
+                    
+                    # Save the annotated frame if available, otherwise save raw frame
+                    frame_to_save = processed_frame if 'processed_frame' in locals() and processed_frame is not None else frame
+                    cv2.imwrite(screenshot_path, frame_to_save)
+                    print(f"📸 Screenshot saved: {screenshot_path}")
             else:
                 # Headless Mode: No display, just process for API
                 pass
@@ -1355,12 +1454,14 @@ def process_camera_feed():
 # Main Execution
 # ---------------------------
 if __name__ == "__main__":
-    # Start GPS monitoring (async, won't block main process)
+    # Start GPS monitoring (async, won't block main process) - OPTIONAL
     gps_started = gps_manager.start()
     if gps_started:
         print("🛰️ GPS monitoring started")
     else:
-        print("⚠️ GPS initialization failed, continuing without GPS")
+        print("⚠️ GPS initialization failed - continuing without GPS")
+        print("📍 GPS data will not be available for this session")
+
 
     try:
         if USE_CAMERA:
