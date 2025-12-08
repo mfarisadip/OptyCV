@@ -8,7 +8,8 @@ Usage:
 import sys
 sys.path.insert(0, "/usr/lib/python3/dist-packages/")
 import argparse
-from datetime import datetime, timedelta
+from datetime import datetime
+import pytz
 import time
 import os
 from threading import Thread
@@ -869,6 +870,14 @@ def send_detection_to_api(detection_type, class_name, confidence, timestamp, fra
     """
     if not API_ENABLED:
         return
+
+    wib = pytz.timezone('Asia/Jakarta')
+
+    waktu_wib = datetime.now(wib)
+
+    waktu_utc = waktu_wib.astimezone(pytz.UTC)
+
+    timestamp_utc = waktu_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
     
     try:
         # Prepare form data
@@ -878,7 +887,7 @@ def send_detection_to_api(detection_type, class_name, confidence, timestamp, fra
             'latitude': str(latitude),
             'longitude': str(longitude),
             'confidence': str(confidence),
-            'timestamp': (datetime.now() + timedelta(hours=7)).isoformat(),  # GMT+7 (WIB)
+            'timestamp': str(timestamp_utc),
             'sequence': str(frame_index),
             'video_time': video_time,
             'frame_index': str(frame_index)
