@@ -8,7 +8,7 @@ Usage:
 import sys
 sys.path.insert(0, "/usr/lib/python3/dist-packages/")
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 import os
 from threading import Thread
@@ -878,7 +878,7 @@ def send_detection_to_api(detection_type, class_name, confidence, timestamp, fra
             'latitude': str(latitude),
             'longitude': str(longitude),
             'confidence': str(confidence),
-            'timestamp': datetime.now().isoformat() + 'Z',  # ISO 8601 format
+            'timestamp': (datetime.now() + timedelta(hours=7)).isoformat(),  # GMT+7 (WIB)
             'sequence': str(frame_index),
             'video_time': video_time,
             'frame_index': str(frame_index)
@@ -1111,7 +1111,7 @@ def process_frame(frame: np.ndarray, frame_index: int = None, return_annotated: 
                         
                         
                         # Send to API
-                        send_detection_async('alligator_cracking', 'alligator cracking', confidence, timestamp,
+                        send_detection_async('crack', 'alligator_cracking', confidence, timestamp,
                                            frame_index if frame_index is not None else 0, timestamp, encoded_jpg_bytes, gps_latitude, gps_longitude)
 
                     elif class_name == 'lateral cracking':
@@ -1130,7 +1130,7 @@ def process_frame(frame: np.ndarray, frame_index: int = None, return_annotated: 
                         
                         
                         # Send to API
-                        send_detection_async('lateral_cracking', 'lateral cracking', confidence, timestamp,
+                        send_detection_async('crack', 'lateral_cracking', confidence, timestamp,
                                            frame_index if frame_index is not None else 0, timestamp, encoded_jpg_bytes, gps_latitude, gps_longitude)
 
                     elif class_name == 'longitudinal cracking':
@@ -1149,7 +1149,7 @@ def process_frame(frame: np.ndarray, frame_index: int = None, return_annotated: 
                         
                         
                         # Send to API
-                        send_detection_async('longitudinal_cracking', 'longitudinal cracking', confidence, timestamp,
+                        send_detection_async('crack', 'longitudinal_cracking', confidence, timestamp,
                                            frame_index if frame_index is not None else 0, timestamp, encoded_jpg_bytes, gps_latitude, gps_longitude)
 
                     elif class_name == 'rutting':
